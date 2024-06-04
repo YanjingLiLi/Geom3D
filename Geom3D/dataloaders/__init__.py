@@ -11,3 +11,5 @@ from Geom3D.dataloaders.dataloaders_GemNetPeriodicCrystal import DataLoaderGemNe
 from Geom3D.dataloaders.dataloaders_AtomTuple import AtomTupleExtractor, DataLoaderAtomTuple
 
 from Geom3D.dataloaders.dataloaders_PeriodicCrystal import DataLoaderPeriodicCrystal
+
+from Geom3D.dataloaders.dataloaders_MSP import DataLoaderMultiPro

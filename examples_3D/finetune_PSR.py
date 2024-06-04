@@ -12,47 +12,14 @@ from torch_geometric.nn import global_max_pool, global_mean_pool
 from tqdm import tqdm
 
 from config import args
-from Geom3D.datasets import DatasetECMultiple, DatasetGVP, DatasetECMultipleGearNet
+from Geom3D.datasets import DatasetPSR, DatasetGVP
 from Geom3D.models import ProNet, GearNetIEConv, MQAModel, CD_Convolution
 import Geom3D.models.GearNet_layer as GearNet_layer
 
-def fmax(probs, labels):
-    thresholds = np.arange(0, 1, 0.01)
-    f_max = 0.0
-
-    for threshold in thresholds:
-        precision = 0.0
-        recall = 0.0
-        precision_cnt = 0
-        recall_cnt = 0
-        for idx in range(probs.shape[0]):
-            prob = probs[idx]
-            label = labels[idx]
-            pred = (prob > threshold).astype(np.int32)
-            correct_sum = np.sum(label*pred)
-            pred_sum = np.sum(pred)
-            label_sum = np.sum(label)
-            if pred_sum > 0:
-                precision += correct_sum/pred_sum
-                precision_cnt += 1
-            if label_sum > 0:
-                recall += correct_sum/label_sum
-            recall_cnt += 1
-        if recall_cnt > 0:
-            recall = recall / recall_cnt
-        else:
-            recall = 0
-        if precision_cnt > 0:
-            precision = precision / precision_cnt
-        else:
-            precision = 0
-        f = (2.*precision*recall)/max(precision+recall, 1e-8)
-        f_max = max(f, f_max)
-
-    return f_max
 
 def model_setup():
-    num_class = 538
+    num_class = 1
+    graph_pred_linear = None
 
     if args.model_3d == "GVP":
         node_in_dim = (6, 3)
@@ -60,14 +27,12 @@ def model_setup():
         edge_in_dim = (32, 1)
         edge_h_dim = (32, 1)
         model = MQAModel(node_in_dim, node_h_dim, edge_in_dim, edge_h_dim, out_channels=num_class)
-        graph_pred_linear = None
 
     elif args.model_3d == "GearNet":
         input_dim = 21
         model = GearNetIEConv(
-            input_dim=input_dim, embedding_dim=512, hidden_dims=[512, 512, 512, 512, 512, 512], num_relation=args.num_relation,
-            batch_norm=True, concat_hidden=True, short_cut=True, readout=args.GearNet_readout, layer_norm=True, dropout=args.GearNet_dropout,
-            edge_input_dim=args.GearNet_edge_input_dim, num_angle_bin=args.GearNet_num_angle_bin)
+            input_dim=input_dim, embedding_dim=512, hidden_dims=[512, 512, 512, 512, 512, 512], num_relation=7,
+            batch_norm=True, concat_hidden=True, short_cut=True, readout="sum", layer_norm=True, dropout=0.2)
 
         num_mlp_layer = 3
         hidden_dims = [model.output_dim] * (num_mlp_layer - 1)
@@ -77,9 +42,8 @@ def model_setup():
     elif args.model_3d == "GearNet_IEConv":
         input_dim = 21
         model = GearNetIEConv(
-            input_dim=input_dim, embedding_dim=512, hidden_dims=[512, 512, 512, 512, 512, 512], num_relation=args.num_relation,
-            batch_norm=True, concat_hidden=True, short_cut=True, readout=args.GearNet_readout, layer_norm=True, dropout=args.GearNet_dropout,
-            edge_input_dim=args.GearNet_edge_input_dim, num_angle_bin=args.GearNet_num_angle_bin)
+            input_dim=input_dim, embedding_dim=512, hidden_dims=[512, 512, 512, 512, 512, 512], num_relation=7,
+            batch_norm=True, concat_hidden=True, short_cut=True, readout="sum", layer_norm=True, dropout=0.2, use_ieconv=True)
 
         num_mlp_layer = 3
         hidden_dims = [model.output_dim] * (num_mlp_layer - 1)
@@ -93,7 +57,6 @@ def model_setup():
             out_channels=num_class,
             euler_noise=args.euler_noise,
         )
-        graph_pred_linear = None
 
     elif args.model_3d == "CDConv":
         geometric_radii = [x * args.CDConv_radius for x in args.CDConv_geometric_raddi_coeff]
@@ -102,7 +65,21 @@ def model_setup():
             sequential_kernel_size=args.CDConv_kernel_size,
             kernel_channels=args.CDConv_kernel_channels, channels=args.CDConv_channels, base_width=args.CDConv_base_width,
             num_classes=num_class)
-        graph_pred_linear = None
+
+    elif args.model_3d == "FrameNetProtein":
+        if args.FrameNetProtein_type == "FrameNetProtein01":
+            model = FrameNetProtein01(
+                num_residue_acid=26,
+                latent_dim=args.emb_dim,
+                num_class=num_class,
+                num_radial=args.FrameNetProtein_num_radial,
+                backbone_cutoff=args.FrameNetProtein_backbone_cutoff,
+                cutoff=args.FrameNetProtein_cutoff,
+                rbf_type=args.FrameNetProtein_rbf_type,
+                rbf_gamma=args.FrameNetProtein_gamma,
+                num_layer=args.FrameNetProtein_num_layer,
+                readout=args.FrameNetProtein_readout,
+            )
 
     else:
         raise Exception("3D model {} not included.".format(args.model_3d))
@@ -183,13 +160,15 @@ def train(epoch, device, loader, optimizer):
         batch = batch.to(device)
 
         if args.model_3d == "GVP":
-            molecule_3D_repr = model(batch=batch)
+            molecule_3D_repr = model(batch.node_s, batch.node_v, batch.edge_s, batch.edge_v, batch.edge_index, batch.batch)
         elif args.model_3d in ["GearNet", "GearNet_IEConv"]:
             molecule_3D_repr = model(batch, batch.node_feature.float())["graph_feature"]
         elif args.model_3d == "ProNet":
-            molecule_3D_repr = model(batch)
+            molecule_3D_repr = model(batch.seq, batch.coords_n, batch.coords_ca, batch.coords_c, batch.side_chain_angle_encoding, batch.backbone_angle_encoding, batch.batch)
         elif args.model_3d == "CDConv":
-            molecule_3D_repr = model(batch, split="training")
+            molecule_3D_repr = model(batch.seq, batch.coords_ca, batch.batch, split="training")
+        elif args.model_3d == "FrameNetProtein":
+            molecule_3D_repr = model(batch.coords_n, batch.coords_ca, batch.coords_c, batch.seq, batch.batch)
 
         if graph_pred_linear is not None:
             pred = graph_pred_linear(molecule_3D_repr).squeeze(1)
@@ -197,11 +176,8 @@ def train(epoch, device, loader, optimizer):
             pred = molecule_3D_repr.squeeze(1)
 
         y = batch.y
-        # print(y)
-        # y = torch.from_numpy(np.stack(y, axis=0)).to(device)
-        # print(y.shape)
 
-        loss = criterion(pred.sigmoid(), y)
+        loss = criterion(pred, y)
 
         optimizer.zero_grad()
         loss.backward()
@@ -256,19 +232,21 @@ def eval(device, loader):
         batch = batch.to(device)
         
         if args.model_3d == "GVP":
-            molecule_3D_repr = model(batch=batch)
+            molecule_3D_repr = model(batch.node_s, batch.node_v, batch.edge_s, batch.edge_v, batch.edge_index, batch.batch)
         elif args.model_3d in ["GearNet", "GearNet_IEConv"]:
             molecule_3D_repr = model(batch, batch.node_feature.float())["graph_feature"]
         elif args.model_3d == "ProNet":
-            molecule_3D_repr = model(batch)
+            molecule_3D_repr = model(batch.seq, batch.coords_n, batch.coords_ca, batch.coords_c, batch.side_chain_angle_encoding, batch.backbone_angle_encoding, batch.batch)
         elif args.model_3d == "CDConv":
-            molecule_3D_repr = model(batch)
+            molecule_3D_repr = model(batch.seq, batch.coords_ca, batch.batch, split="training")
+        elif args.model_3d == "FrameNetProtein":
+            molecule_3D_repr = model(batch.coords_n, batch.coords_ca, batch.coords_c, batch.seq, batch.batch)
 
         if graph_pred_linear is not None:
             pred = graph_pred_linear(molecule_3D_repr).squeeze()
         else:
             pred = molecule_3D_repr.squeeze()
-        pred = pred.sigmoid()
+        pred = pred.argmax(dim=-1)
 
         y = batch.y
 
@@ -278,7 +256,9 @@ def eval(device, loader):
     y_true = torch.cat(y_true, dim=0).cpu().numpy()
     y_scores = torch.cat(y_scores, dim=0).cpu().numpy()
 
-    return fmax(y_scores, y_true)
+    L = len(y_true)
+    acc =  sum(y_true == y_scores) * 1. / L
+    return acc
 
 if __name__ == "__main__":
     torch.manual_seed(args.seed)
@@ -293,41 +273,35 @@ if __name__ == "__main__":
 
     data_root = args.data_root
     
-    dataset_class = DatasetECMultiple
-    if args.model_3d == "GearNet":
-        dataset_class = DatasetECMultipleGearNet
+    dataset_class = DatasetFOLD
+    # if args.model_3d == "GearNet":
+    #     dataset_class = DatasetFOLDGearNet
 
-    train_dataset = dataset_class(root=data_root, split='train')
-    valid_dataset = dataset_class(root=data_root, split='valid')
-    test_30_dataset = dataset_class(root=data_root, split='test', percent=0.3)
-    test_40_dataset = dataset_class(root=data_root, split='test', percent=0.4)
-    test_50_dataset = dataset_class(root=data_root, split='test', percent=0.5)
-    test_70_dataset = dataset_class(root=data_root, split='test', percent=0.7)
-    test_95_dataset = dataset_class(root=data_root, split='test', percent=0.95)
+    train_dataset = dataset_class(root=data_root, split='training')
+    valid_dataset = dataset_class(root=data_root, split='validation')
+    test_fold_dataset = dataset_class(root=data_root, split='test_fold')
+    test_superfamily_dataset = dataset_class(root=data_root, split='test_superfamily')
+    test_family_dataset = dataset_class(root=data_root, split='test_family')
 
     if args.model_3d == "GVP":
-        data_root = "../data/ECMultiple_GVP"
+        data_root = "../data/FOLD_GVP"
         train_dataset = DatasetGVP(
-            root=data_root, dataset=train_dataset, split='train', num_positional_embeddings=args.num_positional_embeddings, top_k=args.top_k, num_rbf=args.num_rbf)
+            root=data_root, dataset=train_dataset, split='training', num_positional_embeddings=args.num_positional_embeddings, top_k=args.top_k, num_rbf=args.num_rbf)
         valid_dataset = DatasetGVP(
-            root=data_root, dataset=valid_dataset, split='valid', num_positional_embeddings=args.num_positional_embeddings, top_k=args.top_k, num_rbf=args.num_rbf)
-        test_30_dataset = DatasetGVP(
-            root=data_root, dataset=test_30_dataset, split='test_0.3', num_positional_embeddings=args.num_positional_embeddings, top_k=args.top_k, num_rbf=args.num_rbf)
-        test_40_dataset = DatasetGVP(
-            root=data_root, dataset=test_40_dataset, split='test_0.4', num_positional_embeddings=args.num_positional_embeddings, top_k=args.top_k, num_rbf=args.num_rbf)
-        test_50_dataset = DatasetGVP(
-            root=data_root, dataset=test_50_dataset, split='test_0.5', num_positional_embeddings=args.num_positional_embeddings, top_k=args.top_k, num_rbf=args.num_rbf)
-        test_70_dataset = DatasetGVP(
-            root=data_root, dataset=test_70_dataset, split='test_0.7', num_positional_embeddings=args.num_positional_embeddings, top_k=args.top_k, num_rbf=args.num_rbf)
-        test_95_dataset = DatasetGVP(
-            root=data_root, dataset=test_95_dataset, split='test_0.95', num_positional_embeddings=args.num_positional_embeddings, top_k=args.top_k, num_rbf=args.num_rbf)
+            root=data_root, dataset=valid_dataset, split='validation', num_positional_embeddings=args.num_positional_embeddings, top_k=args.top_k, num_rbf=args.num_rbf)
+        test_fold_dataset = DatasetGVP(
+            root=data_root, dataset=test_fold_dataset, split='test_fold', num_positional_embeddings=args.num_positional_embeddings, top_k=args.top_k, num_rbf=args.num_rbf)
+        test_superfamily_dataset = DatasetGVP(
+            root=data_root, dataset=test_superfamily_dataset, split='test_superfamily', num_positional_embeddings=args.num_positional_embeddings, top_k=args.top_k, num_rbf=args.num_rbf)
+        test_family_dataset = DatasetGVP(
+            root=data_root, dataset=test_family_dataset, split='test_family', num_positional_embeddings=args.num_positional_embeddings, top_k=args.top_k, num_rbf=args.num_rbf)
 
-    criterion = nn.BCELoss()
+    criterion = nn.CrossEntropyLoss()
 
     DataLoaderClass = PyGDataLoader
     dataloader_kwargs = {}
     if args.model_3d in ["GearNet", "GearNet_IEConv"]:
-        dataloader_kwargs["collate_fn"] = DatasetECMultipleGearNet.collate_fn
+        dataloader_kwargs["collate_fn"] = DatasetFOLD.collate_fn
         DataLoaderClass = TorchDataLoader
 
     train_loader = DataLoaderClass(
@@ -335,7 +309,6 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        drop_last=True,
         **dataloader_kwargs
     )
     val_loader = DataLoaderClass(
@@ -343,47 +316,27 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        drop_last=True,
         **dataloader_kwargs
     )
-    test_30_loader = DataLoaderClass(
-        test_30_dataset,
+    test_fold_loader = DataLoaderClass(
+        test_fold_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        drop_last=True,
         **dataloader_kwargs
     )
-    test_40_loader = DataLoaderClass(
-        test_40_dataset,
+    test_superfamily_loader = DataLoaderClass(
+        test_superfamily_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        drop_last=True,
         **dataloader_kwargs
     )
-    test_50_loader = DataLoaderClass(
-        test_50_dataset,
+    test_family_loader = DataLoaderClass(
+        test_family_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        drop_last=True,
-        **dataloader_kwargs
-    )
-    test_70_loader = DataLoaderClass(
-        test_70_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        drop_last=True,
-        **dataloader_kwargs
-    )
-    test_95_loader = DataLoaderClass(
-        test_95_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        drop_last=True,
         **dataloader_kwargs
     )
 
@@ -404,12 +357,7 @@ if __name__ == "__main__":
         model_param_group.append(
             {"params": graph_pred_linear.parameters(), "lr": args.lr}
         )
-    if args.optimizer == "Adam":
-        optimizer = optim.Adam(model_param_group, lr=args.lr, weight_decay=args.decay)
-    elif args.optimizer == "SGD":
-        optimizer = optim.SGD(model_param_group, lr=args.lr, weight_decay=5e-4, momentum=0.9)
-    elif args.optimizer == "AdamW":
-        optimizer = optim.AdamW(model_param_group, lr=args.lr, weight_decay=0)
+    optimizer = optim.Adam(model_param_group, lr=args.lr, weight_decay=args.decay)
 
     lr_scheduler = None
     if args.lr_scheduler == "CosineAnnealingLR":
@@ -440,7 +388,7 @@ if __name__ == "__main__":
     global_learning_rate = args.lr
 
     train_acc_list, val_acc_list = [], []
-    test_30_list, test_40_list, test_50_list, test_70_list, test_95_list = [], [], [], [], []
+    test_acc_fold_list, test_acc_superfamily_list, test_acc_family_list = [], [], []
     best_val_acc, best_val_idx = -1e10, 0
     for epoch in range(1, args.epochs + 1):
         start_time = time.time()
@@ -452,36 +400,27 @@ if __name__ == "__main__":
                 train_acc, train_target, train_pred = eval(device, train_loader)
             else:
                 train_acc = 0
-
             val_acc = eval(device, val_loader)
-            test_30 = eval(device, test_30_loader)
-            test_40 = eval(device, test_40_loader)
-            test_50 = eval(device, test_50_loader)
-            test_70 = eval(device, test_70_loader)
-            test_95 = eval(device, test_95_loader)
-            
+            test_fold_acc = eval(device, test_fold_loader)
+            test_superfamily_acc = eval(device, test_superfamily_loader)
+            test_family_acc = eval(device, test_family_loader)
 
             train_acc_list.append(train_acc)
             val_acc_list.append(val_acc)
-            test_30_list.append(test_30)
-            test_40_list.append(test_40)
-            test_50_list.append(test_50)
-            test_70_list.append(test_70)
-            test_95_list.append(test_95)
-            
+            test_acc_fold_list.append(test_fold_acc)
+            test_acc_superfamily_list.append(test_superfamily_acc)
+            test_acc_family_list.append(test_family_acc)
             print(
-                "train: {:.6f}\tval: {:.6f}\ttest_30: {:.6f}\ttest_40: {:.6f}\ttest_50: {:.6f}\ttest_70: {:.6f}\ttest_95: {:.6f}".format(
-                    train_acc, val_acc, test_30, test_40, test_50, test_70, test_95
+                "train: {:.6f}\tval: {:.6f}\ttest-fold: {:.6f}\ttest-superfamily: {:.6f}\ttest-family: {:.6f}".format(
+                    train_acc, val_acc, test_fold_acc, test_superfamily_acc, test_family_acc
                 )
             )
 
-            print(val_acc, best_val_acc)
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 best_val_idx = len(train_acc_list) - 1
                 if not args.output_model_dir == "":
                     save_model(save_best=True)
-            print(val_acc, best_val_acc)
 
         if args.lr_scheduler == "StepLRCustomized" and epoch in args.StepLRCustomized_scheduler:
             print('ChanGINg learning rate, from {} to {}'.format(global_learning_rate, global_learning_rate * args.lr_decay_factor)),
@@ -491,14 +430,12 @@ if __name__ == "__main__":
         print("Took\t{}\n".format(time.time() - start_time))
 
     print(
-        "best train: {:.6f}\tval: {:.6f}\ttest_30: {:.6f}\ttest_40: {:.6f}\ttest_50: {:.6f}\ttest_70: {:.6f}\ttest_95: {:.6f}".format(
+        "best train: {:.6f}\tval: {:.6f}\ttest-fold: {:.6f}\ttest-superfamily: {:.6f}\ttest-family: {:.6f}".format(
             train_acc_list[best_val_idx],
             val_acc_list[best_val_idx],
-            test_30_list[best_val_idx],
-            test_40_list[best_val_idx],
-            test_50_list[best_val_idx],
-            test_70_list[best_val_idx],
-            test_95_list[best_val_idx]
+            test_acc_fold_list[best_val_idx],
+            test_acc_superfamily_list[best_val_idx],
+            test_acc_family_list[best_val_idx],
         )
     )
 

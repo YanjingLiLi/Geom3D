@@ -62,6 +62,8 @@ from Geom3D.datasets.dataset_GVP import DatasetGVP
 from Geom3D.datasets.dataset_GO_GearNet import DatasetGOGearNet
 from Geom3D.datasets.dataset_ECMultiple_GearNet import DatasetECMultipleGearNet
 from Geom3D.datasets.dataset_ECSingle_GearNet import DatasetECSingleGearNet
+from Geom3D.datasets.dataset_MSP import DatasetMSP
+from Geom3D.datasets.dataset_PSR import DatasetPSR
 
 # For 2D SSL
 from Geom3D.datasets.dataset_2D_Contextual import MoleculeContextualDataset
