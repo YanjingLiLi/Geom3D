@@ -8,7 +8,7 @@ export batch_size_list=(8 16 64)
 
 
 export epochs=200
-export dataset=GO_bp
+export dataset=GO_mf
 export StepLRCustomized_scheduler="60"
 
 
@@ -26,7 +26,7 @@ for batch_size in "${batch_size_list[@]}"; do
     python finetune_GO.py \
     --model_3d="$model_3d" --dataset="$dataset" --epochs="$epochs" \
     --seed="$seed" \
-    --GO_level bp \
+    --GO_level mf \
     --batch_size="$batch_size" --optimizer SGD --CDConv_base_width 32 \
     --lr="$lr" --lr_scheduler="$lr_scheduler" --print_every_epoch=1 \
     --output_model_dir="$output_model_dir" \
