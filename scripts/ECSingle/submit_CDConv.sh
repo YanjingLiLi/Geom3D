@@ -8,7 +8,7 @@ export batch_size_list=(8 16 64)
 
 
 export epochs=400
-export dataset=fold
+export dataset=ECSingle
 export StepLRCustomized_scheduler="60"
 
 
